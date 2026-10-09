@@ -12,17 +12,17 @@ import java.io.File
 import java.io.RandomAccessFile
 
 enum class MetricType(val displayName: String) {
-    FPS("FPS"),
+    FPS("帧率"),
     CPU("CPU"),
-    TEMP("TEMP"),
-    MEM("MEM"),
-    BAT("BAT"),
-    NET("NET")
+    TEMP("温度"),
+    MEM("内存"),
+    BAT("电池"),
+    NET("网络")
 }
 
 class MetricsCollector(private val context: Context) {
 
-    // ---- FPS ----
+    // ---------- FPS ----------
     private var frameCount = 0
     private var lastFpsTick = 0L
     @Volatile private var fpsValue = 0
@@ -49,7 +49,7 @@ class MetricsCollector(private val context: Context) {
         choreographer.removeFrameCallback(frameCallback)
     }
 
-    // ---- CPU ----
+    // ---------- CPU ----------
     private var lastCpuTotal = 0L
     private var lastCpuIdle = 0L
 
@@ -74,7 +74,7 @@ class MetricsCollector(private val context: Context) {
         }
     }
 
-    // ---- CPU 温度 ----
+    // ---------- 温度 ----------
     private fun readCpuTemp(): Float {
         val keywords = listOf("cpu", "soc", "tsens", "ap", "bigcore", "littlecore", "cluster")
         return try {
@@ -104,7 +104,7 @@ class MetricsCollector(private val context: Context) {
         }
     }
 
-    // ---- 内存 ----
+    // ---------- 内存 ----------
     private fun readMem(): Float {
         return try {
             val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -117,7 +117,7 @@ class MetricsCollector(private val context: Context) {
         }
     }
 
-    // ---- 电池温度 ----
+    // ---------- 电池温度 ----------
     private fun readBatteryTemp(): Float {
         return try {
             val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -128,30 +128,36 @@ class MetricsCollector(private val context: Context) {
         }
     }
 
-    // ---- 网速 ----
+    // ---------- 网络上下行 ----------
     private var lastRxBytes = 0L
-    private var lastRxTime = 0L
+    private var lastTxBytes = 0L
+    private var lastNetTime = 0L
 
-    private fun readNet(): Long {
+    private fun readNetPair(): Pair<Long, Long> {
         return try {
             val now = SystemClock.elapsedRealtime()
             val rx = TrafficStats.getTotalRxBytes()
-            if (lastRxTime == 0L) {
+            val tx = TrafficStats.getTotalTxBytes()
+            if (lastNetTime == 0L) {
                 lastRxBytes = rx
-                lastRxTime = now
-                return 0L
+                lastTxBytes = tx
+                lastNetTime = now
+                return 0L to 0L
             }
-            val dBytes = rx - lastRxBytes
-            val dTime = now - lastRxTime
+            val dRx = rx - lastRxBytes
+            val dTx = tx - lastTxBytes
+            val dTime = now - lastNetTime
             lastRxBytes = rx
-            lastRxTime = now
-            if (dTime <= 0) 0L else dBytes * 1000 / dTime
+            lastTxBytes = tx
+            lastNetTime = now
+            if (dTime <= 0) 0L to 0L
+            else (dRx * 1000 / dTime) to (dTx * 1000 / dTime)
         } catch (e: Exception) {
-            0L
+            0L to 0L
         }
     }
 
-    private fun formatNet(bytesPerSec: Long): String {
+    private fun formatSpeed(bytesPerSec: Long): String {
         return when {
             bytesPerSec < 0 -> "--"
             bytesPerSec < 1024 -> "${bytesPerSec}B"
@@ -160,14 +166,18 @@ class MetricsCollector(private val context: Context) {
         }
     }
 
+    // ---------- 统一查询 ----------
     fun query(type: MetricType): String {
         return when (type) {
             MetricType.FPS -> fpsValue.toString()
-            MetricType.CPU -> "${readCpu().toInt()}"
-            MetricType.TEMP -> "${readCpuTemp().toInt()}"
-            MetricType.MEM -> "${readMem().toInt()}"
-            MetricType.BAT -> String.format("%.1f", readBatteryTemp())
-            MetricType.NET -> formatNet(readNet())
+            MetricType.CPU -> "${readCpu().toInt()}%"
+            MetricType.TEMP -> "${readCpuTemp().toInt()}℃"
+            MetricType.MEM -> "${readMem().toInt()}%"
+            MetricType.BAT -> String.format("%.1f℃", readBatteryTemp())
+            MetricType.NET -> {
+                val (rx, tx) = readNetPair()
+                "↓${formatSpeed(rx)} ↑${formatSpeed(tx)}"
+            }
         }
     }
 }
