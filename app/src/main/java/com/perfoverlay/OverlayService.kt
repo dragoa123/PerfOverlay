@@ -221,6 +221,11 @@ class OverlayService : Service() {
         try {
             wm.addView(rootView, params)
         } catch (e: Exception) {
+            android.widget.Toast.makeText(
+                applicationContext,
+                "悬浮窗添加失败: ${e.message}",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
             stopSelf()
         }
     }
