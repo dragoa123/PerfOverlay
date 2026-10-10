@@ -36,14 +36,19 @@ class OverlayService : Service() {
         const val KEY_METRIC = "metric"
         const val KEY_X = "pos_x"
         const val KEY_Y = "pos_y"
+        const val KEY_MODE = "display_mode"
+        @Volatile var isRunning = false
     }
 
     private lateinit var wm: WindowManager
     private lateinit var rootView: LinearLayout
     private lateinit var menuContainer: LinearLayout
+    private lateinit var singleRow: LinearLayout
+    private lateinit var wideRow: LinearLayout
     private lateinit var nameText: TextView
     private lateinit var valueText: TextView
     private lateinit var arrowText: TextView
+    private lateinit var sparkline: SparklineView
     private lateinit var params: WindowManager.LayoutParams
     private lateinit var prefs: SharedPreferences
 
@@ -51,6 +56,10 @@ class OverlayService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var currentMetric = MetricType.FPS
     private var menuExpanded = false
+    private var displayMode = 0  // 0=单行, 1=单行+曲线, 2=宽条
+
+    private val wideViews = HashMap<MetricType, TextView>()
+    private val wideMetrics = listOf(MetricType.FPS, MetricType.CPU, MetricType.TEMP)
 
     private var initialX = 0
     private var initialY = 0
@@ -61,55 +70,60 @@ class OverlayService : Service() {
     private var lastScreenW = 0
     private var lastScreenH = 0
 
+    // 颜色
+    private val colorNormal = Color.WHITE
+    private val colorWarn = Color.parseColor("#FFB300")
+    private val colorDanger = Color.parseColor("#FF5252")
+
     private val updateRunnable = object : Runnable {
         override fun run() {
-            if (::valueText.isInitialized) {
-                valueText.text = collector.query(currentMetric)
-            }
+            refreshAll()
             checkScreenChange()
             handler.postDelayed(this, 1000L)
         }
     }
 
-    /**
-     * 检测屏幕方向/尺寸变化（如竖屏 → 横屏），
-     * 如果悬浮窗当前位置超出新屏幕范围，自动拉回可见区域。
-     */
-    private fun checkScreenChange() {
-        if (!::rootView.isInitialized || !::params.isInitialized) return
-        val dm = resources.displayMetrics
-        if (lastScreenW == 0) {
-            lastScreenW = dm.widthPixels
-            lastScreenH = dm.heightPixels
-            return
+    private fun severityColor(sev: Int): Int = when (sev) {
+        2 -> colorDanger
+        1 -> colorWarn
+        else -> colorNormal
+    }
+
+    private fun refreshAll() {
+        if (!::valueText.isInitialized) return
+        val raw = collector.queryRaw(currentMetric)
+        val text = collector.query(currentMetric)
+        val sev = collector.getSeverity(currentMetric)
+        val color = severityColor(sev)
+
+        valueText.text = text
+        valueText.setTextColor(color)
+        sparkline.setColor(color)
+
+        if (displayMode == 1) {
+            sparkline.addValue(raw)
         }
-        if (dm.widthPixels != lastScreenW || dm.heightPixels != lastScreenH) {
-            lastScreenW = dm.widthPixels
-            lastScreenH = dm.heightPixels
 
-            val viewW = if (rootView.width > 0) rootView.width else dp(120)
-            val viewH = if (rootView.height > 0) rootView.height else dp(40)
-            val maxX = Math.max(0, dm.widthPixels - viewW)
-            val maxY = Math.max(0, dm.heightPixels - viewH)
-
-            params.x = params.x.coerceIn(0, maxX)
-            params.y = params.y.coerceIn(0, maxY)
-            try {
-                wm.updateViewLayout(rootView, params)
-            } catch (e: Exception) {
+        // 宽条模式
+        if (displayMode == 2) {
+            for (m in wideMetrics) {
+                val tv = wideViews[m] ?: continue
+                val raw2 = collector.queryRaw(m)
+                tv.text = collector.query(m)
+                tv.setTextColor(severityColor(collector.getSeverity(m)))
+                // 未使用的 raw2 警告忽略
             }
-            prefs.edit().putInt(KEY_X, params.x).putInt(KEY_Y, params.y).apply()
         }
     }
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         currentMetric = try {
             MetricType.valueOf(prefs.getString(KEY_METRIC, MetricType.FPS.name) ?: MetricType.FPS.name)
-        } catch (e: Exception) {
-            MetricType.FPS
-        }
+        } catch (e: Exception) { MetricType.FPS }
+        displayMode = prefs.getInt(KEY_MODE, 0)
 
         startForeground(NOTIF_ID, buildNotification())
         collector = MetricsCollector(this)
@@ -157,47 +171,86 @@ class OverlayService : Service() {
             setPadding(dp(12), dp(6), dp(10), dp(6))
         }
 
+        // 菜单
         menuContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
         }
         rootView.addView(menuContainer)
 
-        val mainRow = LinearLayout(this).apply {
+        // 单行
+        singleRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-
         nameText = TextView(this).apply {
             text = currentMetric.displayName
             setTextColor(Color.parseColor("#CCFFFFFF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setPadding(dp(4), dp(8), dp(4), dp(8))
+            setOnClickListener { cycleDisplayMode() }
         }
-
         valueText = TextView(this).apply {
             text = "--"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setPadding(dp(10), 0, dp(6), 0)
+            setPadding(dp(10), dp(8), dp(6), dp(8))
             minWidth = dp(38)
             gravity = Gravity.END
             typeface = Typeface.MONOSPACE
+            setOnClickListener { cycleDisplayMode() }
         }
-
         arrowText = TextView(this).apply {
             text = "▼"
             setTextColor(Color.parseColor("#CCFFFFFF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            setPadding(dp(6), dp(8), dp(6), dp(8))
+            setPadding(dp(6), dp(10), dp(6), dp(10))
             setOnClickListener { toggleMenu() }
         }
+        singleRow.addView(nameText)
+        singleRow.addView(valueText)
+        singleRow.addView(arrowText)
+        rootView.addView(singleRow)
 
-        mainRow.addView(nameText)
-        mainRow.addView(valueText)
-        mainRow.addView(arrowText)
-        rootView.addView(mainRow)
+        // 曲线
+        sparkline = SparklineView(this).apply {
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(dp(110), dp(24)).apply {
+                topMargin = dp(2)
+                bottomMargin = dp(2)
+            }
+        }
+        rootView.addView(sparkline)
+
+        // 宽条
+        wideRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+        }
+        for (m in wideMetrics) {
+            val labelTv = TextView(this).apply {
+                text = m.displayName.split(" ")[0]
+                setTextColor(Color.parseColor("#99FFFFFF"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+                setPadding(dp(6), dp(10), dp(2), dp(10))
+            }
+            val valueTv = TextView(this).apply {
+                text = "--"
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                typeface = Typeface.MONOSPACE
+                setPadding(dp(2), dp(10), dp(4), dp(10))
+            }
+            wideViews[m] = valueTv
+            wideRow.addView(labelTv)
+            wideRow.addView(valueTv)
+        }
+        wideRow.setOnClickListener { cycleDisplayMode() }
+        rootView.addView(wideRow)
 
         buildMenuItems()
+        applyDisplayMode()
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -216,11 +269,11 @@ class OverlayService : Service() {
             x = prefs.getInt(KEY_X, -1)
             y = prefs.getInt(KEY_Y, 300)
             if (x == -1) {
-                x = resources.displayMetrics.widthPixels - dp(130)
+                x = resources.displayMetrics.widthPixels - dp(140)
             }
         }
 
-        mainRow.setOnTouchListener { _, event ->
+        val touchListener = View.OnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     initialX = params.x
@@ -252,6 +305,8 @@ class OverlayService : Service() {
                 else -> false
             }
         }
+        singleRow.setOnTouchListener(touchListener)
+        wideRow.setOnTouchListener(touchListener)
 
         try {
             wm.addView(rootView, params)
@@ -262,6 +317,35 @@ class OverlayService : Service() {
                 android.widget.Toast.LENGTH_LONG
             ).show()
             stopSelf()
+        }
+    }
+
+    private fun cycleDisplayMode() {
+        displayMode = (displayMode + 1) % 3
+        prefs.edit().putInt(KEY_MODE, displayMode).apply()
+        applyDisplayMode()
+    }
+
+    private fun applyDisplayMode() {
+        when (displayMode) {
+            0 -> {
+                singleRow.visibility = View.VISIBLE
+                sparkline.visibility = View.GONE
+                wideRow.visibility = View.GONE
+            }
+            1 -> {
+                singleRow.visibility = View.VISIBLE
+                sparkline.visibility = View.VISIBLE
+                wideRow.visibility = View.GONE
+                sparkline.clear()
+                val (minV, maxV) = collector.getRange(currentMetric)
+                sparkline.configure(minV, maxV)
+            }
+            2 -> {
+                singleRow.visibility = View.GONE
+                sparkline.visibility = View.GONE
+                wideRow.visibility = View.VISIBLE
+            }
         }
     }
 
@@ -281,6 +365,11 @@ class OverlayService : Service() {
                     menuContainer.visibility = View.GONE
                     arrowText.text = "▼"
                     buildMenuItems()
+                    if (displayMode == 1) {
+                        sparkline.clear()
+                        val (minV, maxV) = collector.getRange(m)
+                        sparkline.configure(minV, maxV)
+                    }
                     valueText.text = collector.query(currentMetric)
                 }
             }
@@ -294,8 +383,33 @@ class OverlayService : Service() {
         arrowText.text = if (menuExpanded) "▲" else "▼"
     }
 
+    private fun checkScreenChange() {
+        if (!::rootView.isInitialized || !::params.isInitialized) return
+        val dm = resources.displayMetrics
+        if (lastScreenW == 0) {
+            lastScreenW = dm.widthPixels
+            lastScreenH = dm.heightPixels
+            return
+        }
+        if (dm.widthPixels != lastScreenW || dm.heightPixels != lastScreenH) {
+            lastScreenW = dm.widthPixels
+            lastScreenH = dm.heightPixels
+
+            val viewW = if (rootView.width > 0) rootView.width else dp(140)
+            val viewH = if (rootView.height > 0) rootView.height else dp(40)
+            val maxX = Math.max(0, dm.widthPixels - viewW)
+            val maxY = Math.max(0, dm.heightPixels - viewH)
+
+            params.x = params.x.coerceIn(0, maxX)
+            params.y = params.y.coerceIn(0, maxY)
+            try { wm.updateViewLayout(rootView, params) } catch (e: Exception) {}
+            prefs.edit().putInt(KEY_X, params.x).putInt(KEY_Y, params.y).apply()
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        isRunning = false
         handler.removeCallbacks(updateRunnable)
         try { collector.stopFps() } catch (e: Exception) {}
         if (::rootView.isInitialized) {
@@ -304,6 +418,5 @@ class OverlayService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 }
