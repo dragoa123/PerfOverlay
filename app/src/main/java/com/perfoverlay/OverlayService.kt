@@ -41,16 +41,22 @@ class OverlayService : Service() {
 
         private const val MAX_SELECTED = 3
         private val SERIES_COLORS = intArrayOf(
-            Color.parseColor("#4CAF50"),
-            Color.parseColor("#2196F3"),
-            Color.parseColor("#FF9800")
+            Color.parseColor("#4CAF50"),  // 绿
+            Color.parseColor("#42A5F5"),  // 蓝
+            Color.parseColor("#FF9800")   // 橙
         )
+
+        private const val METRIC_GROUP_W = 64
+        private const val NAME_W = 26
+        private const val VALUE_W = 36
+        private const val ARROW_W = 22
+        private const val CHART_BTN_W = 22
     }
 
     private lateinit var wm: WindowManager
     private lateinit var rootView: LinearLayout
     private lateinit var menuContainer: LinearLayout
-    private lateinit var metricsRow: LinearLayout
+    private lateinit var metricsContainer: LinearLayout
     private lateinit var arrowText: TextView
     private lateinit var chartBtn: TextView
     private lateinit var chartView: MultiSparklineView
@@ -60,7 +66,7 @@ class OverlayService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
     private val selectedMetrics = ArrayList<MetricType>()
-    private val metricViews = HashMap<MetricType, TextView>()
+    private val valueViews = HashMap<MetricType, TextView>()
     private var showChart = false
     private var menuExpanded = false
 
@@ -103,15 +109,15 @@ class OverlayService : Service() {
     }
 
     private fun refreshAll() {
-        if (metricViews.isEmpty()) return
+        if (valueViews.isEmpty()) return
 
         val chartValues = ArrayList<Float>()
         for (m in selectedMetrics) {
             val raw = collector.queryRaw(m)
             val text = collector.query(m)
             val sev = collector.getSeverity(m)
-            metricViews[m]?.text = "${shortName(m)} $text"
-            metricViews[m]?.setTextColor(severityColor(sev))
+            valueViews[m]?.text = text
+            valueViews[m]?.setTextColor(severityColor(sev))
             chartValues.add(raw)
         }
 
@@ -183,6 +189,10 @@ class OverlayService : Service() {
         TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics
     ).roundToInt()
 
+    /**
+     * 统一触摸处理：拖动 + 单击
+     * 拖动时暂停刷新，避免布局抖动
+     */
     private fun createTouchListener(onClick: (() -> Unit)?): View.OnTouchListener {
         return View.OnTouchListener { _, event ->
             when (event.action) {
@@ -192,6 +202,7 @@ class OverlayService : Service() {
                     downX = event.rawX
                     downY = event.rawY
                     dragging = false
+                    handler.removeCallbacks(updateRunnable)   // 暂停刷新
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -213,12 +224,16 @@ class OverlayService : Service() {
                     } else if (onClick != null) {
                         onClick.invoke()
                     }
+                    handler.removeCallbacks(updateRunnable)
+                    handler.postDelayed(updateRunnable, 150L)   // 稍后恢复刷新
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     if (dragging) {
                         prefs.edit().putInt(KEY_X, params.x).putInt(KEY_Y, params.y).apply()
                     }
+                    handler.removeCallbacks(updateRunnable)
+                    handler.postDelayed(updateRunnable, 150L)
                     true
                 }
                 else -> false
@@ -235,9 +250,10 @@ class OverlayService : Service() {
                 setColor(Color.parseColor("#CC000000"))
                 cornerRadius = dp(12).toFloat()
             }
-            setPadding(dp(10), dp(4), dp(8), dp(4))
+            setPadding(dp(8), dp(4), dp(6), dp(4))
         }
 
+        // ---------- 参数菜单 ----------
         menuContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
@@ -245,23 +261,26 @@ class OverlayService : Service() {
         menuContainer.setOnTouchListener(createTouchListener(null))
         rootView.addView(menuContainer)
 
+        // ---------- 主行：参数 + ▼ + 📈 ----------
         val mainRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
 
-        metricsRow = LinearLayout(this).apply {
+        metricsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        metricsRow.setOnTouchListener(createTouchListener { toggleMenu() })
-        mainRow.addView(metricsRow)
+        metricsContainer.setOnTouchListener(createTouchListener { toggleMenu() })
+        mainRow.addView(metricsContainer)
 
         arrowText = TextView(this).apply {
             text = "▼"
             setTextColor(Color.parseColor("#CCFFFFFF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            setPadding(dp(6), dp(6), dp(4), dp(6))
+            gravity = Gravity.CENTER
+            width = dp(ARROW_W)
+            height = dp(28)
         }
         arrowText.setOnTouchListener(createTouchListener { toggleMenu() })
         mainRow.addView(arrowText)
@@ -269,7 +288,9 @@ class OverlayService : Service() {
         chartBtn = TextView(this).apply {
             text = "📈"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            setPadding(dp(2), dp(6), dp(4), dp(6))
+            gravity = Gravity.CENTER
+            width = dp(CHART_BTN_W)
+            height = dp(28)
             setTextColor(if (showChart) colorSelected else Color.parseColor("#CCFFFFFF"))
         }
         chartBtn.setOnTouchListener(createTouchListener { toggleChart() })
@@ -277,13 +298,19 @@ class OverlayService : Service() {
 
         rootView.addView(mainRow)
 
+        // ---------- 曲线区 ----------
         chartView = MultiSparklineView(this).apply {
             visibility = if (showChart) View.VISIBLE else View.GONE
-            layoutParams = LinearLayout.LayoutParams(dp(140), dp(30)).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(34)
+            ).apply {
                 topMargin = dp(2)
                 bottomMargin = dp(2)
             }
         }
+        // ★ 关键：曲线区也能拖动
+        chartView.setOnTouchListener(createTouchListener(null))
         rootView.addView(chartView)
 
         rebuildMetricsRow()
@@ -306,7 +333,7 @@ class OverlayService : Service() {
             x = prefs.getInt(KEY_X, -1)
             y = prefs.getInt(KEY_Y, 300)
             if (x == -1) {
-                x = resources.displayMetrics.widthPixels - dp(140)
+                x = resources.displayMetrics.widthPixels - dp(160)
             }
         }
 
@@ -322,33 +349,49 @@ class OverlayService : Service() {
         }
     }
 
+    /**
+     * 重建参数行
+     * 每个参数的 name 用曲线颜色，value 用 severity 颜色
+     * 每个参数视图固定宽度 → 布局不会因为数据变化而抖动
+     */
     private fun rebuildMetricsRow() {
-        metricsRow.removeAllViews()
-        metricViews.clear()
+        metricsContainer.removeAllViews()
+        valueViews.clear()
 
         for ((index, m) in selectedMetrics.withIndex()) {
-            if (index > 0) {
-                val sep = TextView(this).apply {
-                    text = "│"
-                    setTextColor(Color.parseColor("#33FFFFFF"))
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-                    setPadding(dp(4), 0, dp(4), 0)
-                    isClickable = false
-                    isFocusable = false
-                }
-                metricsRow.addView(sep)
+            val group = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    dp(METRIC_GROUP_W), dp(28)
+                )
             }
-            val tv = TextView(this).apply {
-                text = "${shortName(m)} --"
+
+            val nameTv = TextView(this).apply {
+                text = shortName(m)
+                setTextColor(SERIES_COLORS[index % SERIES_COLORS.size])  // 曲线同色
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                width = dp(NAME_W)
+                maxLines = 1
+            }
+
+            val valueTv = TextView(this).apply {
+                text = "--"
                 setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 typeface = Typeface.MONOSPACE
-                setPadding(dp(2), dp(6), dp(2), dp(6))
-                isClickable = false
-                isFocusable = false
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                width = dp(VALUE_W)
+                maxLines = 1
             }
-            metricViews[m] = tv
-            metricsRow.addView(tv)
+
+            group.addView(nameTv)
+            group.addView(valueTv)
+            valueViews[m] = valueTv
+
+            group.setOnTouchListener(createTouchListener { toggleMenu() })
+            metricsContainer.addView(group)
         }
 
         updateChartSeries()
@@ -439,7 +482,7 @@ class OverlayService : Service() {
             lastScreenW = dm.widthPixels
             lastScreenH = dm.heightPixels
 
-            val viewW = if (rootView.width > 0) rootView.width else dp(140)
+            val viewW = if (rootView.width > 0) rootView.width else dp(160)
             val viewH = if (rootView.height > 0) rootView.height else dp(40)
             val maxX = Math.max(0, dm.widthPixels - viewW)
             val maxY = Math.max(0, dm.heightPixels - viewH)
