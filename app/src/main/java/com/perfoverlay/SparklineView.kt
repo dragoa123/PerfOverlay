@@ -18,9 +18,11 @@ class SparklineView @JvmOverloads constructor(
     private var minValue = 0f
     private var maxValue = 100f
 
+    private val density = context.resources.displayMetrics.density
+
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 3f
+        strokeWidth = density * 2f
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
         color = Color.WHITE
@@ -28,6 +30,12 @@ class SparklineView @JvmOverloads constructor(
 
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
+        color = 0x55FFFFFF
+    }
+
+    private val baselinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = density * 0.5f
         color = 0x33FFFFFF
     }
 
@@ -43,6 +51,16 @@ class SparklineView @JvmOverloads constructor(
         invalidate()
     }
 
+    /**
+     * 预先用同一个值填满整个 buffer，
+     * 让曲线一开始就是一条水平线，而不是空白
+     */
+    fun prefill(v: Float) {
+        data.clear()
+        repeat(maxPoints) { data.addLast(v) }
+        invalidate()
+    }
+
     fun clear() {
         data.clear()
         invalidate()
@@ -50,16 +68,22 @@ class SparklineView @JvmOverloads constructor(
 
     fun setColor(c: Int) {
         strokePaint.color = c
-        fillPaint.color = (c and 0x00FFFFFF) or 0x33000000
+        // 使用 c 的 RGB 部分，加上 0x55 的 alpha
+        fillPaint.color = (c and 0x00FFFFFF) or 0x55000000
         invalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        if (data.size < 2) return
 
         val w = width.toFloat()
         val h = height.toFloat()
+
+        // 画一条中间基准线
+        canvas.drawLine(0f, h / 2f, w, h / 2f, baselinePaint)
+
+        if (data.size < 2) return
+
         val padding = strokePaint.strokeWidth
         val usableH = h - padding * 2
         val step = w / (maxPoints - 1)
