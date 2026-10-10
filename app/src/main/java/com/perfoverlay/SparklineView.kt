@@ -2,35 +2,33 @@ package com.perfoverlay
 
 import android.content.Context
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.util.AttributeSet
 import android.view.View
 
-class SparklineView @JvmOverloads constructor(
+class MultiSparklineView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
-    private val data = ArrayDeque<Float>()
-    private val maxPoints = 30
-    private var minValue = 0f
-    private var maxValue = 100f
+    class Series(val color: Int, val min: Float, val max: Float) {
+        val values = ArrayDeque<Float>()
+    }
 
+    private val maxPoints = 30
+    private val series = ArrayList<Series>()
     private val density = context.resources.displayMetrics.density
 
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = density * 2f
+        strokeWidth = density * 1.6f
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
-        color = Color.WHITE
     }
 
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
-        color = 0x55FFFFFF
     }
 
     private val baselinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -39,37 +37,34 @@ class SparklineView @JvmOverloads constructor(
         color = 0x33FFFFFF
     }
 
-    fun configure(min: Float, max: Float) {
-        minValue = min
-        maxValue = max
+    fun setSeries(newSeries: List<Series>) {
+        series.clear()
+        series.addAll(newSeries)
         invalidate()
     }
 
-    fun addValue(v: Float) {
-        data.addLast(v)
-        while (data.size > maxPoints) data.removeFirst()
+    fun addValues(values: List<Float>) {
+        values.forEachIndexed { i, v ->
+            if (i < series.size) {
+                val s = series[i]
+                s.values.addLast(v)
+                while (s.values.size > maxPoints) s.values.removeFirst()
+            }
+        }
         invalidate()
     }
 
-    /**
-     * 预先用同一个值填满整个 buffer，
-     * 让曲线一开始就是一条水平线，而不是空白
-     */
-    fun prefill(v: Float) {
-        data.clear()
-        repeat(maxPoints) { data.addLast(v) }
+    fun prefillAll(values: List<Float>) {
+        series.forEachIndexed { i, s ->
+            s.values.clear()
+            val v = values.getOrElse(i) { 0f }
+            repeat(maxPoints) { s.values.addLast(v) }
+        }
         invalidate()
     }
 
     fun clear() {
-        data.clear()
-        invalidate()
-    }
-
-    fun setColor(c: Int) {
-        strokePaint.color = c
-        // 使用 c 的 RGB 部分，加上 0x55 的 alpha
-        fillPaint.color = (c and 0x00FFFFFF) or 0x55000000
+        series.forEach { it.values.clear() }
         invalidate()
     }
 
@@ -79,35 +74,43 @@ class SparklineView @JvmOverloads constructor(
         val w = width.toFloat()
         val h = height.toFloat()
 
-        // 画一条中间基准线
         canvas.drawLine(0f, h / 2f, w, h / 2f, baselinePaint)
 
-        if (data.size < 2) return
+        if (series.isEmpty()) return
 
-        val padding = strokePaint.strokeWidth
+        val padding = density * 2f
         val usableH = h - padding * 2
         val step = w / (maxPoints - 1)
 
-        val path = Path()
-        val fillPath = Path()
-        data.forEachIndexed { i, v ->
-            val normalized = ((v - minValue) / (maxValue - minValue)).coerceIn(0f, 1f)
-            val x = i * step
-            val y = padding + (1f - normalized) * usableH
-            if (i == 0) {
-                path.moveTo(x, y)
-                fillPath.moveTo(x, h)
-                fillPath.lineTo(x, y)
-            } else {
-                path.lineTo(x, y)
-                fillPath.lineTo(x, y)
-            }
-        }
-        val lastX = (data.size - 1) * step
-        fillPath.lineTo(lastX, h)
-        fillPath.close()
+        for (s in series) {
+            if (s.values.size < 2) continue
 
-        canvas.drawPath(fillPath, fillPaint)
-        canvas.drawPath(path, strokePaint)
+            strokePaint.color = s.color
+            fillPaint.color = (s.color and 0x00FFFFFF) or 0x22000000
+
+            val path = Path()
+            val fillPath = Path()
+            val range = s.max - s.min
+            s.values.forEachIndexed { i, v ->
+                val normalized = if (range <= 0f) 0.5f
+                    else ((v - s.min) / range).coerceIn(0f, 1f)
+                val x = i * step
+                val y = padding + (1f - normalized) * usableH
+                if (i == 0) {
+                    path.moveTo(x, y)
+                    fillPath.moveTo(x, h)
+                    fillPath.lineTo(x, y)
+                } else {
+                    path.lineTo(x, y)
+                    fillPath.lineTo(x, y)
+                }
+            }
+            val lastX = (s.values.size - 1) * step
+            fillPath.lineTo(lastX, h)
+            fillPath.close()
+
+            canvas.drawPath(fillPath, fillPaint)
+            canvas.drawPath(path, strokePaint)
+        }
     }
 }
