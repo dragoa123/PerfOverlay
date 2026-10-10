@@ -23,6 +23,8 @@ enum class MetricType(val displayName: String) {
 
 class MetricsCollector(private val context: Context) {
 
+    private val lastValues = HashMap<MetricType, Float>()
+
     // ---------- FPS ----------
     private var frameCount = 0
     private var lastFpsTick = 0L
@@ -42,13 +44,8 @@ class MetricsCollector(private val context: Context) {
         }
     }
 
-    fun startFps() {
-        choreographer.postFrameCallback(frameCallback)
-    }
-
-    fun stopFps() {
-        choreographer.removeFrameCallback(frameCallback)
-    }
+    fun startFps() { choreographer.postFrameCallback(frameCallback) }
+    fun stopFps() { choreographer.removeFrameCallback(frameCallback) }
 
     // ---------- CPU ----------
     private var lastCpuTotal = 0L
@@ -86,26 +83,20 @@ class MetricsCollector(private val context: Context) {
                 if (!f.name.startsWith("thermal_zone")) continue
                 val type = try {
                     File(f, "type").readText().trim().lowercase()
-                } catch (e: Exception) {
-                    continue
-                }
+                } catch (e: Exception) { continue }
                 if (keywords.any { type.contains(it) }) {
                     val raw = try {
                         File(f, "temp").readText().trim().toFloat()
-                    } catch (e: Exception) {
-                        continue
-                    }
+                    } catch (e: Exception) { continue }
                     val celsius = if (raw > 1000f) raw / 1000f else raw
                     if (celsius in 1f..120f && celsius > best) best = celsius
                 }
             }
             best
-        } catch (e: Exception) {
-            0f
-        }
+        } catch (e: Exception) { 0f }
     }
 
-    // ---------- 内存（返回 已用/总量，单位字节） ----------
+    // ---------- 内存 ----------
     private fun readMemPair(): Pair<Long, Long> {
         return try {
             val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -113,9 +104,7 @@ class MetricsCollector(private val context: Context) {
             am.getMemoryInfo(info)
             val used = info.totalMem - info.availMem
             used to info.totalMem
-        } catch (e: Exception) {
-            0L to 0L
-        }
+        } catch (e: Exception) { 0L to 0L }
     }
 
     private fun formatMem(bytes: Long): String {
@@ -125,7 +114,7 @@ class MetricsCollector(private val context: Context) {
         else String.format("%.1fG", gb)
     }
 
-    // ---------- 电池（返回 百分比 + 温度） ----------
+    // ---------- 电池 ----------
     private fun readBattery(): Pair<Int, Float> {
         return try {
             val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -134,12 +123,10 @@ class MetricsCollector(private val context: Context) {
             val t = (intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10f
             val pct = if (scale > 0 && level >= 0) (level * 100 / scale) else -1
             pct to t
-        } catch (e: Exception) {
-            -1 to 0f
-        }
+        } catch (e: Exception) { -1 to 0f }
     }
 
-    // ---------- 网络上下行 ----------
+    // ---------- 网络 ----------
     private var lastRxBytes = 0L
     private var lastTxBytes = 0L
     private var lastNetTime = 0L
@@ -150,22 +137,16 @@ class MetricsCollector(private val context: Context) {
             val rx = TrafficStats.getTotalRxBytes()
             val tx = TrafficStats.getTotalTxBytes()
             if (lastNetTime == 0L) {
-                lastRxBytes = rx
-                lastTxBytes = tx
-                lastNetTime = now
+                lastRxBytes = rx; lastTxBytes = tx; lastNetTime = now
                 return 0L to 0L
             }
             val dRx = rx - lastRxBytes
             val dTx = tx - lastTxBytes
             val dTime = now - lastNetTime
-            lastRxBytes = rx
-            lastTxBytes = tx
-            lastNetTime = now
+            lastRxBytes = rx; lastTxBytes = tx; lastNetTime = now
             if (dTime <= 0) 0L to 0L
             else (dRx * 1000 / dTime) to (dTx * 1000 / dTime)
-        } catch (e: Exception) {
-            0L to 0L
-        }
+        } catch (e: Exception) { 0L to 0L }
     }
 
     private fun formatSpeed(bytesPerSec: Long): String {
@@ -177,20 +158,15 @@ class MetricsCollector(private val context: Context) {
         }
     }
 
-    // ---------- GPU 使用率 ----------
-    // 无 root 情况下尝试从多个常见路径读取，读不到返回 -1
+    // ---------- GPU ----------
     private fun readGpu(): Float {
         val paths = listOf(
-            // 高通 Adreno
             "/sys/class/kgsl/kgsl-3d0/gpubusy",
             "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage",
             "/sys/class/kgsl/kgsl-3d0/devfreq/load",
-            // 联发科 Mali
             "/sys/kernel/gpu/gpu_busy",
             "/sys/kernel/gpu/gpu_loading",
-            // 三星
             "/sys/devices/platform/kgsl-3d0.0/kgsl/kgsl-3d0/gpubusy",
-            // 部分通用
             "/sys/devices/platform/gpu/load",
             "/sys/class/devfreq/gpufreq/load"
         )
@@ -201,45 +177,109 @@ class MetricsCollector(private val context: Context) {
                 val content = f.readText().trim()
                 if (content.isEmpty()) continue
                 val parts = content.split(Regex("\\s+"))
-                // 有的文件是两个数字：busy total
                 if (parts.size == 2) {
                     val busy = parts[0].toLongOrNull() ?: continue
                     val total = parts[1].toLongOrNull() ?: continue
                     if (total > 0) return (busy.toFloat() / total * 100f).coerceIn(0f, 100f)
                 }
-                // 有的文件是单个百分比
                 val v = content.toFloatOrNull() ?: continue
                 if (v in 0f..100f) return v
-            } catch (e: Exception) {
-                continue
-            }
+            } catch (e: Exception) { continue }
         }
         return -1f
     }
 
-    // ---------- 统一查询 ----------
-    fun query(type: MetricType): String {
-        return when (type) {
-            MetricType.FPS -> fpsValue.toString()
-            MetricType.CPU -> "${readCpu().toInt()}%"
-            MetricType.TEMP -> "${readCpuTemp().toInt()}℃"
+    // ---------- 原始数值（用于曲线和阈值） ----------
+    fun queryRaw(type: MetricType): Float {
+        val v = when (type) {
+            MetricType.FPS -> fpsValue.toFloat()
+            MetricType.CPU -> readCpu()
+            MetricType.TEMP -> readCpuTemp()
             MetricType.MEM -> {
                 val (used, total) = readMemPair()
-                "${formatMem(used)}/${formatMem(total)}"
+                if (total > 0) used.toFloat() / total * 100f else 0f
             }
             MetricType.BAT -> {
-                val (pct, temp) = readBattery()
-                val pctStr = if (pct < 0) "--" else "$pct%"
-                String.format("%s %.1f℃", pctStr, temp)
+                val (pct, _) = readBattery()
+                if (pct < 0) 0f else pct.toFloat()
             }
             MetricType.NET -> {
                 val (rx, tx) = readNetPair()
-                "↓${formatSpeed(rx)} ↑${formatSpeed(tx)}"
+                (rx + tx) / 1024f
             }
             MetricType.GPU -> {
                 val g = readGpu()
-                if (g < 0f) "不可用" else "${g.toInt()}%"
+                if (g < 0f) 0f else g
             }
+        }
+        lastValues[type] = v
+        return v
+    }
+
+    fun getRange(type: MetricType): Pair<Float, Float> = when (type) {
+        MetricType.FPS -> 0f to 120f
+        MetricType.CPU -> 0f to 100f
+        MetricType.TEMP -> 20f to 80f
+        MetricType.MEM -> 0f to 100f
+        MetricType.BAT -> 0f to 100f
+        MetricType.NET -> 0f to 4096f
+        MetricType.GPU -> 0f to 100f
+    }
+
+    fun getSeverity(type: MetricType): Int {
+        val v = lastValues[type] ?: queryRaw(type)
+        return when (type) {
+            MetricType.FPS -> when {
+                v < 25f -> 2
+                v < 45f -> 1
+                else -> 0
+            }
+            MetricType.CPU -> when {
+                v >= 90f -> 2
+                v >= 80f -> 1
+                else -> 0
+            }
+            MetricType.TEMP -> when {
+                v >= 50f -> 2
+                v >= 45f -> 1
+                else -> 0
+            }
+            MetricType.MEM -> when {
+                v >= 90f -> 2
+                v >= 80f -> 1
+                else -> 0
+            }
+            MetricType.BAT -> when {
+                v <= 10f -> 2
+                v <= 20f -> 1
+                else -> 0
+            }
+            MetricType.GPU -> if (v >= 90f) 1 else 0
+            MetricType.NET -> 0
+        }
+    }
+
+    // ---------- 显示字符串 ----------
+    fun query(type: MetricType): String = when (type) {
+        MetricType.FPS -> fpsValue.toString()
+        MetricType.CPU -> "${readCpu().toInt()}%"
+        MetricType.TEMP -> "${readCpuTemp().toInt()}℃"
+        MetricType.MEM -> {
+            val (used, total) = readMemPair()
+            "${formatMem(used)}/${formatMem(total)}"
+        }
+        MetricType.BAT -> {
+            val (pct, temp) = readBattery()
+            val pctStr = if (pct < 0) "--" else "$pct%"
+            String.format("%s %.1f℃", pctStr, temp)
+        }
+        MetricType.NET -> {
+            val (rx, tx) = readNetPair()
+            "↓${formatSpeed(rx)} ↑${formatSpeed(tx)}"
+        }
+        MetricType.GPU -> {
+            val g = readGpu()
+            if (g < 0f) "不可用" else "${g.toInt()}%"
         }
     }
 }
