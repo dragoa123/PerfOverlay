@@ -33,36 +33,36 @@ class OverlayService : Service() {
         private const val CHANNEL_ID = "perf_overlay"
         private const val NOTIF_ID = 1001
         const val PREFS = "perf_overlay_prefs"
-        const val KEY_METRIC = "metric"
+        const val KEY_SELECTED = "selected_metrics"
+        const val KEY_SHOW_CHART = "show_chart"
         const val KEY_X = "pos_x"
         const val KEY_Y = "pos_y"
-        const val KEY_MODE = "display_mode"
-        const val KEY_SLOT = "slot_"
         @Volatile var isRunning = false
+
+        private const val MAX_SELECTED = 3
+        private val SERIES_COLORS = intArrayOf(
+            Color.parseColor("#4CAF50"),
+            Color.parseColor("#2196F3"),
+            Color.parseColor("#FF9800")
+        )
     }
 
     private lateinit var wm: WindowManager
     private lateinit var rootView: LinearLayout
     private lateinit var menuContainer: LinearLayout
-    private lateinit var singleRow: LinearLayout
-    private lateinit var wideRow: LinearLayout
-    private lateinit var nameText: TextView
-    private lateinit var valueText: TextView
+    private lateinit var metricsRow: LinearLayout
     private lateinit var arrowText: TextView
-    private lateinit var sparkline: SparklineView
+    private lateinit var chartBtn: TextView
+    private lateinit var chartView: MultiSparklineView
     private lateinit var params: WindowManager.LayoutParams
     private lateinit var prefs: SharedPreferences
-
     private lateinit var collector: MetricsCollector
-    private val handler = Handler(Looper.getMainLooper())
-    private var currentMetric = MetricType.FPS
-    private var menuExpanded = false
-    private var displayMode = 0
 
-    // 宽条模式三个槽
-    private val slotLabels = ArrayList<TextView>()
-    private val slotValues = ArrayList<TextView>()
-    private val slotMetrics = arrayOf(MetricType.FPS, MetricType.CPU, MetricType.TEMP)
+    private val handler = Handler(Looper.getMainLooper())
+    private val selectedMetrics = ArrayList<MetricType>()
+    private val metricViews = HashMap<MetricType, TextView>()
+    private var showChart = false
+    private var menuExpanded = false
 
     private var initialX = 0
     private var initialY = 0
@@ -76,6 +76,7 @@ class OverlayService : Service() {
     private val colorNormal = Color.WHITE
     private val colorWarn = Color.parseColor("#FFB300")
     private val colorDanger = Color.parseColor("#FF5252")
+    private val colorSelected = Color.parseColor("#4FC3F7")
 
     private val updateRunnable = object : Runnable {
         override fun run() {
@@ -91,29 +92,31 @@ class OverlayService : Service() {
         else -> colorNormal
     }
 
+    private fun shortName(m: MetricType): String = when (m) {
+        MetricType.FPS -> "FPS"
+        MetricType.CPU -> "CPU"
+        MetricType.TEMP -> "温度"
+        MetricType.MEM -> "内存"
+        MetricType.BAT -> "电池"
+        MetricType.NET -> "网络"
+        MetricType.GPU -> "GPU"
+    }
+
     private fun refreshAll() {
-        if (!::valueText.isInitialized) return
+        if (metricViews.isEmpty()) return
 
-        val raw = collector.queryRaw(currentMetric)
-        val text = collector.query(currentMetric)
-        val sev = collector.getSeverity(currentMetric)
-        val color = severityColor(sev)
-
-        valueText.text = text
-        valueText.setTextColor(color)
-        sparkline.setColor(color)
-
-        if (displayMode == 1) {
-            sparkline.addValue(raw)
+        val chartValues = ArrayList<Float>()
+        for (m in selectedMetrics) {
+            val raw = collector.queryRaw(m)
+            val text = collector.query(m)
+            val sev = collector.getSeverity(m)
+            metricViews[m]?.text = "${shortName(m)} $text"
+            metricViews[m]?.setTextColor(severityColor(sev))
+            chartValues.add(raw)
         }
 
-        if (displayMode == 2) {
-            for (i in slotMetrics.indices) {
-                val m = slotMetrics[i]
-                collector.queryRaw(m)
-                slotValues[i].text = collector.query(m)
-                slotValues[i].setTextColor(severityColor(collector.getSeverity(m)))
-            }
+        if (showChart && chartValues.isNotEmpty()) {
+            chartView.addValues(chartValues)
         }
     }
 
@@ -122,28 +125,35 @@ class OverlayService : Service() {
         isRunning = true
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-        currentMetric = try {
-            MetricType.valueOf(prefs.getString(KEY_METRIC, MetricType.FPS.name) ?: MetricType.FPS.name)
-        } catch (e: Exception) { MetricType.FPS }
-
-        displayMode = prefs.getInt(KEY_MODE, 0)
-
-        // 加载三个槽的参数
-        for (i in 0..2) {
-            try {
-                slotMetrics[i] = MetricType.valueOf(
-                    prefs.getString("$KEY_SLOT$i", slotMetrics[i].name) ?: slotMetrics[i].name
-                )
-            } catch (e: Exception) {
-                // 保持默认
-            }
-        }
+        loadSelectedMetrics()
+        showChart = prefs.getBoolean(KEY_SHOW_CHART, false)
 
         startForeground(NOTIF_ID, buildNotification())
         collector = MetricsCollector(this)
         collector.startFps()
         buildOverlay()
         handler.post(updateRunnable)
+    }
+
+    private fun loadSelectedMetrics() {
+        val saved = prefs.getString(KEY_SELECTED, "FPS") ?: "FPS"
+        selectedMetrics.clear()
+        saved.split(",").forEach { name ->
+            try {
+                val m = MetricType.valueOf(name.trim())
+                if (selectedMetrics.size < MAX_SELECTED && !selectedMetrics.contains(m)) {
+                    selectedMetrics.add(m)
+                }
+            } catch (e: Exception) {}
+        }
+        if (selectedMetrics.isEmpty()) selectedMetrics.add(MetricType.FPS)
+    }
+
+    private fun saveSelectedMetrics() {
+        prefs.edit().putString(
+            KEY_SELECTED,
+            selectedMetrics.joinToString(",") { it.name }
+        ).apply()
     }
 
     private fun buildNotification(): Notification {
@@ -173,11 +183,8 @@ class OverlayService : Service() {
         TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics
     ).roundToInt()
 
-    /**
-     * 统一的触摸处理：拖动 + 点击（通过位移判断）
-     */
-    private fun attachTouch(view: View, onClick: (() -> Unit)?) {
-        view.setOnTouchListener { _, event ->
+    private fun createTouchListener(onClick: (() -> Unit)?): View.OnTouchListener {
+        return View.OnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     initialX = params.x
@@ -204,7 +211,7 @@ class OverlayService : Service() {
                     if (dragging) {
                         prefs.edit().putInt(KEY_X, params.x).putInt(KEY_Y, params.y).apply()
                     } else if (onClick != null) {
-                        onClick()
+                        onClick.invoke()
                     }
                     true
                 }
@@ -228,102 +235,59 @@ class OverlayService : Service() {
                 setColor(Color.parseColor("#CC000000"))
                 cornerRadius = dp(12).toFloat()
             }
-            setPadding(dp(12), dp(6), dp(10), dp(6))
+            setPadding(dp(10), dp(4), dp(8), dp(4))
         }
 
-        // ---------- 菜单 ----------
         menuContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
         }
+        menuContainer.setOnTouchListener(createTouchListener(null))
         rootView.addView(menuContainer)
 
-        // ---------- 单行 ----------
-        singleRow = LinearLayout(this).apply {
+        val mainRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
 
-        nameText = TextView(this).apply {
-            text = currentMetric.displayName
-            setTextColor(Color.parseColor("#CCFFFFFF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        metricsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
-        valueText = TextView(this).apply {
-            text = "--"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setPadding(dp(10), 0, dp(6), 0)
-            minWidth = dp(38)
-            gravity = Gravity.END
-            typeface = Typeface.MONOSPACE
-        }
+        metricsRow.setOnTouchListener(createTouchListener { toggleMenu() })
+        mainRow.addView(metricsRow)
+
         arrowText = TextView(this).apply {
             text = "▼"
             setTextColor(Color.parseColor("#CCFFFFFF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            setPadding(dp(6), dp(4), dp(6), dp(4))
+            setPadding(dp(6), dp(6), dp(4), dp(6))
         }
+        arrowText.setOnTouchListener(createTouchListener { toggleMenu() })
+        mainRow.addView(arrowText)
 
-        // 每个子 View 单独处理触摸，把整个单行区域都变成可拖动可点击
-        attachTouch(nameText) { cycleDisplayMode() }
-        attachTouch(valueText) { cycleDisplayMode() }
-        attachTouch(arrowText) { toggleMenu() }
+        chartBtn = TextView(this).apply {
+            text = "📈"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setPadding(dp(2), dp(6), dp(4), dp(6))
+            setTextColor(if (showChart) colorSelected else Color.parseColor("#CCFFFFFF"))
+        }
+        chartBtn.setOnTouchListener(createTouchListener { toggleChart() })
+        mainRow.addView(chartBtn)
 
-        singleRow.addView(nameText)
-        singleRow.addView(valueText)
-        singleRow.addView(arrowText)
-        rootView.addView(singleRow)
+        rootView.addView(mainRow)
 
-        // ---------- 曲线 ----------
-        sparkline = SparklineView(this).apply {
-            visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(dp(110), dp(22)).apply {
+        chartView = MultiSparklineView(this).apply {
+            visibility = if (showChart) View.VISIBLE else View.GONE
+            layoutParams = LinearLayout.LayoutParams(dp(140), dp(30)).apply {
                 topMargin = dp(2)
                 bottomMargin = dp(2)
             }
         }
-        rootView.addView(sparkline)
+        rootView.addView(chartView)
 
-        // ---------- 宽条 ----------
-        wideRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            visibility = View.GONE
-        }
-
-        for (i in 0..2) {
-            val slot = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val labelTv = TextView(this).apply {
-                text = slotMetrics[i].displayName.split(" ")[0]
-                setTextColor(Color.parseColor("#99FFFFFF"))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
-                setPadding(dp(6), dp(6), dp(2), dp(6))
-            }
-            val valueTv = TextView(this).apply {
-                text = "--"
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                typeface = Typeface.MONOSPACE
-                setPadding(dp(2), dp(6), dp(4), dp(6))
-            }
-            slotLabels.add(labelTv)
-            slotValues.add(valueTv)
-            slot.addView(labelTv)
-            slot.addView(valueTv)
-
-            val slotIndex = i
-            attachTouch(slot) { cycleSlot(slotIndex) }
-
-            wideRow.addView(slot)
-        }
-        rootView.addView(wideRow)
-
+        rebuildMetricsRow()
         buildMenuItems()
-        applyDisplayMode()
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -346,9 +310,6 @@ class OverlayService : Service() {
             }
         }
 
-        // 菜单区域也能拖动
-        attachTouch(menuContainer, null)
-
         try {
             wm.addView(rootView, params)
         } catch (e: Exception) {
@@ -361,80 +322,103 @@ class OverlayService : Service() {
         }
     }
 
-    /**
-     * 宽条模式下点某个槽，循环切换这个槽显示的参数
-     */
-    private fun cycleSlot(slotIndex: Int) {
-        val all = MetricType.values()
-        val current = slotMetrics[slotIndex]
-        val idx = all.indexOf(current)
-        val next = all[(idx + 1) % all.size]
-        slotMetrics[slotIndex] = next
-        prefs.edit().putString("$KEY_SLOT$slotIndex", next.name).apply()
-        slotLabels[slotIndex].text = next.displayName.split(" ")[0]
-        // 立即刷新一次
-        collector.queryRaw(next)
-        slotValues[slotIndex].text = collector.query(next)
-        slotValues[slotIndex].setTextColor(severityColor(collector.getSeverity(next)))
+    private fun rebuildMetricsRow() {
+        metricsRow.removeAllViews()
+        metricViews.clear()
+
+        for ((index, m) in selectedMetrics.withIndex()) {
+            if (index > 0) {
+                val sep = TextView(this).apply {
+                    text = "│"
+                    setTextColor(Color.parseColor("#33FFFFFF"))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                    setPadding(dp(4), 0, dp(4), 0)
+                    isClickable = false
+                    isFocusable = false
+                }
+                metricsRow.addView(sep)
+            }
+            val tv = TextView(this).apply {
+                text = "${shortName(m)} --"
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                typeface = Typeface.MONOSPACE
+                setPadding(dp(2), dp(6), dp(2), dp(6))
+                isClickable = false
+                isFocusable = false
+            }
+            metricViews[m] = tv
+            metricsRow.addView(tv)
+        }
+
+        updateChartSeries()
     }
 
-    private fun cycleDisplayMode() {
-        displayMode = (displayMode + 1) % 3
-        prefs.edit().putInt(KEY_MODE, displayMode).apply()
-        applyDisplayMode()
+    private fun updateChartSeries() {
+        if (!::chartView.isInitialized) return
+        val series = selectedMetrics.mapIndexed { i, m ->
+            val (min, max) = collector.getRange(m)
+            MultiSparklineView.Series(SERIES_COLORS[i % SERIES_COLORS.size], min, max)
+        }
+        chartView.setSeries(series)
+        if (showChart) {
+            val values = selectedMetrics.map { collector.queryRaw(it) }
+            chartView.prefillAll(values)
+        }
     }
 
-    private fun applyDisplayMode() {
-        when (displayMode) {
-            0 -> {
-                singleRow.visibility = View.VISIBLE
-                sparkline.visibility = View.GONE
-                wideRow.visibility = View.GONE
-            }
-            1 -> {
-                singleRow.visibility = View.VISIBLE
-                sparkline.visibility = View.VISIBLE
-                wideRow.visibility = View.GONE
-                val (minV, maxV) = collector.getRange(currentMetric)
-                sparkline.configure(minV, maxV)
-                val raw = collector.queryRaw(currentMetric)
-                sparkline.prefill(raw)
-            }
-            2 -> {
-                singleRow.visibility = View.GONE
-                sparkline.visibility = View.GONE
-                wideRow.visibility = View.VISIBLE
-            }
+    private fun toggleChart() {
+        showChart = !showChart
+        prefs.edit().putBoolean(KEY_SHOW_CHART, showChart).apply()
+        chartView.visibility = if (showChart) View.VISIBLE else View.GONE
+        chartBtn.setTextColor(if (showChart) colorSelected else Color.parseColor("#CCFFFFFF"))
+        if (showChart) {
+            updateChartSeries()
         }
     }
 
     private fun buildMenuItems() {
         menuContainer.removeAllViews()
+
         for (m in MetricType.values()) {
+            val selected = selectedMetrics.contains(m)
             val tv = TextView(this).apply {
-                text = m.displayName
-                setTextColor(if (m == currentMetric) Color.parseColor("#4FC3F7") else Color.WHITE)
+                text = if (selected) "✓ ${m.displayName}" else "   ${m.displayName}"
+                setTextColor(if (selected) colorSelected else Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setPadding(dp(4), dp(8), dp(16), dp(8))
             }
-            attachTouch(tv) {
-                currentMetric = m
-                prefs.edit().putString(KEY_METRIC, m.name).apply()
-                nameText.text = m.displayName
-                menuExpanded = false
-                menuContainer.visibility = View.GONE
-                arrowText.text = "▼"
-                buildMenuItems()
-                if (displayMode == 1) {
-                    val (minV, maxV) = collector.getRange(m)
-                    sparkline.configure(minV, maxV)
-                    val raw = collector.queryRaw(m)
-                    sparkline.prefill(raw)
-                }
-                valueText.text = collector.query(currentMetric)
-            }
+            tv.setOnTouchListener(createTouchListener { onMenuItemClick(m) })
             menuContainer.addView(tv)
         }
+    }
+
+    private fun onMenuItemClick(m: MetricType) {
+        if (selectedMetrics.contains(m)) {
+            if (selectedMetrics.size <= 1) {
+                android.widget.Toast.makeText(
+                    applicationContext,
+                    "至少保留一个参数",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+            selectedMetrics.remove(m)
+        } else {
+            if (selectedMetrics.size >= MAX_SELECTED) {
+                android.widget.Toast.makeText(
+                    applicationContext,
+                    "最多选择 $MAX_SELECTED 个参数，先取消一个",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+            selectedMetrics.add(m)
+        }
+        saveSelectedMetrics()
+        rebuildMetricsRow()
+        buildMenuItems()
+        refreshAll()
     }
 
     private fun toggleMenu() {
