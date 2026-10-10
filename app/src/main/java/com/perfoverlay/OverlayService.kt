@@ -58,12 +58,47 @@ class OverlayService : Service() {
     private var downY = 0f
     private var dragging = false
 
+    private var lastScreenW = 0
+    private var lastScreenH = 0
+
     private val updateRunnable = object : Runnable {
         override fun run() {
             if (::valueText.isInitialized) {
                 valueText.text = collector.query(currentMetric)
             }
+            checkScreenChange()
             handler.postDelayed(this, 1000L)
+        }
+    }
+
+    /**
+     * 检测屏幕方向/尺寸变化（如竖屏 → 横屏），
+     * 如果悬浮窗当前位置超出新屏幕范围，自动拉回可见区域。
+     */
+    private fun checkScreenChange() {
+        if (!::rootView.isInitialized || !::params.isInitialized) return
+        val dm = resources.displayMetrics
+        if (lastScreenW == 0) {
+            lastScreenW = dm.widthPixels
+            lastScreenH = dm.heightPixels
+            return
+        }
+        if (dm.widthPixels != lastScreenW || dm.heightPixels != lastScreenH) {
+            lastScreenW = dm.widthPixels
+            lastScreenH = dm.heightPixels
+
+            val viewW = if (rootView.width > 0) rootView.width else dp(120)
+            val viewH = if (rootView.height > 0) rootView.height else dp(40)
+            val maxX = Math.max(0, dm.widthPixels - viewW)
+            val maxY = Math.max(0, dm.heightPixels - viewH)
+
+            params.x = params.x.coerceIn(0, maxX)
+            params.y = params.y.coerceIn(0, maxY)
+            try {
+                wm.updateViewLayout(rootView, params)
+            } catch (e: Exception) {
+            }
+            prefs.edit().putInt(KEY_X, params.x).putInt(KEY_Y, params.y).apply()
         }
     }
 
