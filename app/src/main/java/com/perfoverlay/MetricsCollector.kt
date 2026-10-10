@@ -12,12 +12,13 @@ import java.io.File
 import java.io.RandomAccessFile
 
 enum class MetricType(val displayName: String) {
-    FPS("帧率"),
-    CPU("CPU"),
-    TEMP("温度"),
-    MEM("内存"),
-    BAT("电池"),
-    NET("网络")
+    FPS("FPS 帧率"),
+    CPU("CPU 处理器"),
+    TEMP("TEMP 温度"),
+    MEM("MEM 内存"),
+    BAT("BAT 电池"),
+    NET("NET 网络"),
+    GPU("GPU 显卡")
 }
 
 class MetricsCollector(private val context: Context) {
@@ -104,27 +105,37 @@ class MetricsCollector(private val context: Context) {
         }
     }
 
-    // ---------- 内存 ----------
-    private fun readMem(): Float {
+    // ---------- 内存（返回 已用/总量，单位字节） ----------
+    private fun readMemPair(): Pair<Long, Long> {
         return try {
             val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
             val info = ActivityManager.MemoryInfo()
             am.getMemoryInfo(info)
             val used = info.totalMem - info.availMem
-            used.toFloat() / info.totalMem * 100f
+            used to info.totalMem
         } catch (e: Exception) {
-            0f
+            0L to 0L
         }
     }
 
-    // ---------- 电池温度 ----------
-    private fun readBatteryTemp(): Float {
+    private fun formatMem(bytes: Long): String {
+        if (bytes <= 0) return "--"
+        val gb = bytes.toFloat() / 1024f / 1024f / 1024f
+        return if (gb >= 10f) String.format("%.0fG", gb)
+        else String.format("%.1fG", gb)
+    }
+
+    // ---------- 电池（返回 百分比 + 温度） ----------
+    private fun readBattery(): Pair<Int, Float> {
         return try {
             val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-            val t = intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
-            t / 10f
+            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+            val t = (intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10f
+            val pct = if (scale > 0 && level >= 0) (level * 100 / scale) else -1
+            pct to t
         } catch (e: Exception) {
-            0f
+            -1 to 0f
         }
     }
 
@@ -166,17 +177,68 @@ class MetricsCollector(private val context: Context) {
         }
     }
 
+    // ---------- GPU 使用率 ----------
+    // 无 root 情况下尝试从多个常见路径读取，读不到返回 -1
+    private fun readGpu(): Float {
+        val paths = listOf(
+            // 高通 Adreno
+            "/sys/class/kgsl/kgsl-3d0/gpubusy",
+            "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage",
+            "/sys/class/kgsl/kgsl-3d0/devfreq/load",
+            // 联发科 Mali
+            "/sys/kernel/gpu/gpu_busy",
+            "/sys/kernel/gpu/gpu_loading",
+            // 三星
+            "/sys/devices/platform/kgsl-3d0.0/kgsl/kgsl-3d0/gpubusy",
+            // 部分通用
+            "/sys/devices/platform/gpu/load",
+            "/sys/class/devfreq/gpufreq/load"
+        )
+        for (path in paths) {
+            try {
+                val f = File(path)
+                if (!f.exists() || !f.canRead()) continue
+                val content = f.readText().trim()
+                if (content.isEmpty()) continue
+                val parts = content.split(Regex("\\s+"))
+                // 有的文件是两个数字：busy total
+                if (parts.size == 2) {
+                    val busy = parts[0].toLongOrNull() ?: continue
+                    val total = parts[1].toLongOrNull() ?: continue
+                    if (total > 0) return (busy.toFloat() / total * 100f).coerceIn(0f, 100f)
+                }
+                // 有的文件是单个百分比
+                val v = content.toFloatOrNull() ?: continue
+                if (v in 0f..100f) return v
+            } catch (e: Exception) {
+                continue
+            }
+        }
+        return -1f
+    }
+
     // ---------- 统一查询 ----------
     fun query(type: MetricType): String {
         return when (type) {
             MetricType.FPS -> fpsValue.toString()
             MetricType.CPU -> "${readCpu().toInt()}%"
             MetricType.TEMP -> "${readCpuTemp().toInt()}℃"
-            MetricType.MEM -> "${readMem().toInt()}%"
-            MetricType.BAT -> String.format("%.1f℃", readBatteryTemp())
+            MetricType.MEM -> {
+                val (used, total) = readMemPair()
+                "${formatMem(used)}/${formatMem(total)}"
+            }
+            MetricType.BAT -> {
+                val (pct, temp) = readBattery()
+                val pctStr = if (pct < 0) "--" else "$pct%"
+                String.format("%s %.1f℃", pctStr, temp)
+            }
             MetricType.NET -> {
                 val (rx, tx) = readNetPair()
                 "↓${formatSpeed(rx)} ↑${formatSpeed(tx)}"
+            }
+            MetricType.GPU -> {
+                val g = readGpu()
+                if (g < 0f) "不可用" else "${g.toInt()}%"
             }
         }
     }
