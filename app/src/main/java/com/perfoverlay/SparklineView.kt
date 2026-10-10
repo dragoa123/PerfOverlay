@@ -31,10 +31,16 @@ class MultiSparklineView @JvmOverloads constructor(
         style = Paint.Style.FILL
     }
 
-    private val baselinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = density * 0.5f
-        color = 0x33FFFFFF
+        color = 0x22FFFFFF
+    }
+
+    private val axisPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = density * 0.8f
+        color = 0x55FFFFFF
     }
 
     fun setSeries(newSeries: List<Series>) {
@@ -74,7 +80,15 @@ class MultiSparklineView @JvmOverloads constructor(
         val w = width.toFloat()
         val h = height.toFloat()
 
-        canvas.drawLine(0f, h / 2f, w, h / 2f, baselinePaint)
+        // 网格：3 条水平线（25% / 50% / 75%）
+        for (i in 1..3) {
+            val y = h * i / 4f
+            canvas.drawLine(0f, y, w, y, gridPaint)
+        }
+
+        // 左右 Y 轴
+        canvas.drawLine(1f, 0f, 1f, h, axisPaint)
+        canvas.drawLine(w - 1f, 0f, w - 1f, h, axisPaint)
 
         if (series.isEmpty()) return
 
