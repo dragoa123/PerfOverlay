@@ -37,6 +37,7 @@ class OverlayService : Service() {
         const val KEY_X = "pos_x"
         const val KEY_Y = "pos_y"
         const val KEY_MODE = "display_mode"
+        const val KEY_SLOT = "slot_"
         @Volatile var isRunning = false
     }
 
@@ -56,10 +57,12 @@ class OverlayService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var currentMetric = MetricType.FPS
     private var menuExpanded = false
-    private var displayMode = 0  // 0=单行, 1=单行+曲线, 2=宽条
+    private var displayMode = 0
 
-    private val wideViews = HashMap<MetricType, TextView>()
-    private val wideMetrics = listOf(MetricType.FPS, MetricType.CPU, MetricType.TEMP)
+    // 宽条模式三个槽
+    private val slotLabels = ArrayList<TextView>()
+    private val slotValues = ArrayList<TextView>()
+    private val slotMetrics = arrayOf(MetricType.FPS, MetricType.CPU, MetricType.TEMP)
 
     private var initialX = 0
     private var initialY = 0
@@ -70,7 +73,6 @@ class OverlayService : Service() {
     private var lastScreenW = 0
     private var lastScreenH = 0
 
-    // 颜色
     private val colorNormal = Color.WHITE
     private val colorWarn = Color.parseColor("#FFB300")
     private val colorDanger = Color.parseColor("#FF5252")
@@ -91,6 +93,7 @@ class OverlayService : Service() {
 
     private fun refreshAll() {
         if (!::valueText.isInitialized) return
+
         val raw = collector.queryRaw(currentMetric)
         val text = collector.query(currentMetric)
         val sev = collector.getSeverity(currentMetric)
@@ -104,14 +107,12 @@ class OverlayService : Service() {
             sparkline.addValue(raw)
         }
 
-        // 宽条模式
         if (displayMode == 2) {
-            for (m in wideMetrics) {
-                val tv = wideViews[m] ?: continue
-                val raw2 = collector.queryRaw(m)
-                tv.text = collector.query(m)
-                tv.setTextColor(severityColor(collector.getSeverity(m)))
-                // 未使用的 raw2 警告忽略
+            for (i in slotMetrics.indices) {
+                val m = slotMetrics[i]
+                collector.queryRaw(m)
+                slotValues[i].text = collector.query(m)
+                slotValues[i].setTextColor(severityColor(collector.getSeverity(m)))
             }
         }
     }
@@ -120,10 +121,23 @@ class OverlayService : Service() {
         super.onCreate()
         isRunning = true
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
         currentMetric = try {
             MetricType.valueOf(prefs.getString(KEY_METRIC, MetricType.FPS.name) ?: MetricType.FPS.name)
         } catch (e: Exception) { MetricType.FPS }
+
         displayMode = prefs.getInt(KEY_MODE, 0)
+
+        // 加载三个槽的参数
+        for (i in 0..2) {
+            try {
+                slotMetrics[i] = MetricType.valueOf(
+                    prefs.getString("$KEY_SLOT$i", slotMetrics[i].name) ?: slotMetrics[i].name
+                )
+            } catch (e: Exception) {
+                // 保持默认
+            }
+        }
 
         startForeground(NOTIF_ID, buildNotification())
         collector = MetricsCollector(this)
@@ -159,6 +173,52 @@ class OverlayService : Service() {
         TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics
     ).roundToInt()
 
+    /**
+     * 统一的触摸处理：拖动 + 点击（通过位移判断）
+     */
+    private fun attachTouch(view: View, onClick: (() -> Unit)?) {
+        view.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = params.x
+                    initialY = params.y
+                    downX = event.rawX
+                    downY = event.rawY
+                    dragging = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - downX
+                    val dy = event.rawY - downY
+                    if (!dragging && (abs(dx) > dp(6) || abs(dy) > dp(6))) {
+                        dragging = true
+                    }
+                    if (dragging) {
+                        params.x = initialX + dx.toInt()
+                        params.y = initialY + dy.toInt()
+                        try { wm.updateViewLayout(rootView, params) } catch (e: Exception) {}
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (dragging) {
+                        prefs.edit().putInt(KEY_X, params.x).putInt(KEY_Y, params.y).apply()
+                    } else if (onClick != null) {
+                        onClick()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    if (dragging) {
+                        prefs.edit().putInt(KEY_X, params.x).putInt(KEY_Y, params.y).apply()
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
     private fun buildOverlay() {
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
@@ -171,82 +231,95 @@ class OverlayService : Service() {
             setPadding(dp(12), dp(6), dp(10), dp(6))
         }
 
-        // 菜单
+        // ---------- 菜单 ----------
         menuContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
         }
         rootView.addView(menuContainer)
 
-        // 单行
+        // ---------- 单行 ----------
         singleRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
+
         nameText = TextView(this).apply {
             text = currentMetric.displayName
             setTextColor(Color.parseColor("#CCFFFFFF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            setPadding(dp(4), dp(8), dp(4), dp(8))
-            setOnClickListener { cycleDisplayMode() }
         }
         valueText = TextView(this).apply {
             text = "--"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setPadding(dp(10), dp(8), dp(6), dp(8))
+            setPadding(dp(10), 0, dp(6), 0)
             minWidth = dp(38)
             gravity = Gravity.END
             typeface = Typeface.MONOSPACE
-            setOnClickListener { cycleDisplayMode() }
         }
         arrowText = TextView(this).apply {
             text = "▼"
             setTextColor(Color.parseColor("#CCFFFFFF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            setPadding(dp(6), dp(10), dp(6), dp(10))
-            setOnClickListener { toggleMenu() }
+            setPadding(dp(6), dp(4), dp(6), dp(4))
         }
+
+        // 每个子 View 单独处理触摸，把整个单行区域都变成可拖动可点击
+        attachTouch(nameText) { cycleDisplayMode() }
+        attachTouch(valueText) { cycleDisplayMode() }
+        attachTouch(arrowText) { toggleMenu() }
+
         singleRow.addView(nameText)
         singleRow.addView(valueText)
         singleRow.addView(arrowText)
         rootView.addView(singleRow)
 
-        // 曲线
+        // ---------- 曲线 ----------
         sparkline = SparklineView(this).apply {
             visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(dp(110), dp(24)).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(110), dp(22)).apply {
                 topMargin = dp(2)
                 bottomMargin = dp(2)
             }
         }
         rootView.addView(sparkline)
 
-        // 宽条
+        // ---------- 宽条 ----------
         wideRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             visibility = View.GONE
         }
-        for (m in wideMetrics) {
+
+        for (i in 0..2) {
+            val slot = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
             val labelTv = TextView(this).apply {
-                text = m.displayName.split(" ")[0]
+                text = slotMetrics[i].displayName.split(" ")[0]
                 setTextColor(Color.parseColor("#99FFFFFF"))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
-                setPadding(dp(6), dp(10), dp(2), dp(10))
+                setPadding(dp(6), dp(6), dp(2), dp(6))
             }
             val valueTv = TextView(this).apply {
                 text = "--"
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 typeface = Typeface.MONOSPACE
-                setPadding(dp(2), dp(10), dp(4), dp(10))
+                setPadding(dp(2), dp(6), dp(4), dp(6))
             }
-            wideViews[m] = valueTv
-            wideRow.addView(labelTv)
-            wideRow.addView(valueTv)
+            slotLabels.add(labelTv)
+            slotValues.add(valueTv)
+            slot.addView(labelTv)
+            slot.addView(valueTv)
+
+            val slotIndex = i
+            attachTouch(slot) { cycleSlot(slotIndex) }
+
+            wideRow.addView(slot)
         }
-        wideRow.setOnClickListener { cycleDisplayMode() }
         rootView.addView(wideRow)
 
         buildMenuItems()
@@ -273,40 +346,8 @@ class OverlayService : Service() {
             }
         }
 
-        val touchListener = View.OnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    initialX = params.x
-                    initialY = params.y
-                    downX = event.rawX
-                    downY = event.rawY
-                    dragging = false
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = event.rawX - downX
-                    val dy = event.rawY - downY
-                    if (!dragging && (abs(dx) > dp(6) || abs(dy) > dp(6))) {
-                        dragging = true
-                    }
-                    if (dragging) {
-                        params.x = initialX + dx.toInt()
-                        params.y = initialY + dy.toInt()
-                        try { wm.updateViewLayout(rootView, params) } catch (e: Exception) {}
-                    }
-                    true
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (dragging) {
-                        prefs.edit().putInt(KEY_X, params.x).putInt(KEY_Y, params.y).apply()
-                    }
-                    true
-                }
-                else -> false
-            }
-        }
-        singleRow.setOnTouchListener(touchListener)
-        wideRow.setOnTouchListener(touchListener)
+        // 菜单区域也能拖动
+        attachTouch(menuContainer, null)
 
         try {
             wm.addView(rootView, params)
@@ -318,6 +359,23 @@ class OverlayService : Service() {
             ).show()
             stopSelf()
         }
+    }
+
+    /**
+     * 宽条模式下点某个槽，循环切换这个槽显示的参数
+     */
+    private fun cycleSlot(slotIndex: Int) {
+        val all = MetricType.values()
+        val current = slotMetrics[slotIndex]
+        val idx = all.indexOf(current)
+        val next = all[(idx + 1) % all.size]
+        slotMetrics[slotIndex] = next
+        prefs.edit().putString("$KEY_SLOT$slotIndex", next.name).apply()
+        slotLabels[slotIndex].text = next.displayName.split(" ")[0]
+        // 立即刷新一次
+        collector.queryRaw(next)
+        slotValues[slotIndex].text = collector.query(next)
+        slotValues[slotIndex].setTextColor(severityColor(collector.getSeverity(next)))
     }
 
     private fun cycleDisplayMode() {
@@ -337,9 +395,10 @@ class OverlayService : Service() {
                 singleRow.visibility = View.VISIBLE
                 sparkline.visibility = View.VISIBLE
                 wideRow.visibility = View.GONE
-                sparkline.clear()
                 val (minV, maxV) = collector.getRange(currentMetric)
                 sparkline.configure(minV, maxV)
+                val raw = collector.queryRaw(currentMetric)
+                sparkline.prefill(raw)
             }
             2 -> {
                 singleRow.visibility = View.GONE
@@ -357,21 +416,22 @@ class OverlayService : Service() {
                 setTextColor(if (m == currentMetric) Color.parseColor("#4FC3F7") else Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setPadding(dp(4), dp(8), dp(16), dp(8))
-                setOnClickListener {
-                    currentMetric = m
-                    prefs.edit().putString(KEY_METRIC, m.name).apply()
-                    nameText.text = m.displayName
-                    menuExpanded = false
-                    menuContainer.visibility = View.GONE
-                    arrowText.text = "▼"
-                    buildMenuItems()
-                    if (displayMode == 1) {
-                        sparkline.clear()
-                        val (minV, maxV) = collector.getRange(m)
-                        sparkline.configure(minV, maxV)
-                    }
-                    valueText.text = collector.query(currentMetric)
+            }
+            attachTouch(tv) {
+                currentMetric = m
+                prefs.edit().putString(KEY_METRIC, m.name).apply()
+                nameText.text = m.displayName
+                menuExpanded = false
+                menuContainer.visibility = View.GONE
+                arrowText.text = "▼"
+                buildMenuItems()
+                if (displayMode == 1) {
+                    val (minV, maxV) = collector.getRange(m)
+                    sparkline.configure(minV, maxV)
+                    val raw = collector.queryRaw(m)
+                    sparkline.prefill(raw)
                 }
+                valueText.text = collector.query(currentMetric)
             }
             menuContainer.addView(tv)
         }
