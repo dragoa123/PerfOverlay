@@ -269,7 +269,7 @@ class OverlayService : Service() {
                 cornerRadius = dp(12).toFloat()
             }
             setPadding(dp(8), dp(4), dp(6), dp(4))
-            minimumWidth = dp(100)
+            minimumWidth = dp(80)
         }
 
         // ---------- 参数菜单 ----------
@@ -327,7 +327,7 @@ class OverlayService : Service() {
             visibility = if (showChart) View.VISIBLE else View.GONE
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(36)
+                dp(40)
             ).apply {
                 topMargin = dp(2)
                 bottomMargin = dp(2)
