@@ -41,12 +41,11 @@ class OverlayService : Service() {
 
         private const val MAX_SELECTED = 3
         private val SERIES_COLORS = intArrayOf(
-            Color.parseColor("#4CAF50"),  // 绿
-            Color.parseColor("#42A5F5"),  // 蓝
-            Color.parseColor("#FF9800")   // 橙
+            Color.parseColor("#4CAF50"),
+            Color.parseColor("#42A5F5"),
+            Color.parseColor("#FF9800")
         )
 
-        // 布局尺寸（dp）
         private const val METRIC_ROW_H = 22
         private const val NAME_W = 32
         private const val VALUE_W = 82
@@ -189,6 +188,20 @@ class OverlayService : Service() {
         TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics
     ).roundToInt()
 
+    /**
+     * 把坐标限制在当前屏幕可见范围内
+     */
+    private fun clampPosition(x: Int, y: Int): Pair<Int, Int> {
+        val dm = resources.displayMetrics
+        val viewW = if (::rootView.isInitialized && rootView.width > 0)
+            rootView.width else dp(160)
+        val viewH = if (::rootView.isInitialized && rootView.height > 0)
+            rootView.height else dp(40)
+        val maxX = Math.max(0, dm.widthPixels - viewW)
+        val maxY = Math.max(0, dm.heightPixels - viewH)
+        return x.coerceIn(0, maxX) to y.coerceIn(0, maxY)
+    }
+
     private fun createTouchListener(onClick: (() -> Unit)?): View.OnTouchListener {
         return View.OnTouchListener { _, event ->
             when (event.action) {
@@ -208,14 +221,23 @@ class OverlayService : Service() {
                         dragging = true
                     }
                     if (dragging) {
-                        params.x = initialX + dx.toInt()
-                        params.y = initialY + dy.toInt()
+                        // ★ 关键：拖动时限制在屏幕内
+                        val (newX, newY) = clampPosition(
+                            initialX + dx.toInt(),
+                            initialY + dy.toInt()
+                        )
+                        params.x = newX
+                        params.y = newY
                         try { wm.updateViewLayout(rootView, params) } catch (e: Exception) {}
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
                     if (dragging) {
+                        val (newX, newY) = clampPosition(params.x, params.y)
+                        params.x = newX
+                        params.y = newY
+                        try { wm.updateViewLayout(rootView, params) } catch (e: Exception) {}
                         prefs.edit().putInt(KEY_X, params.x).putInt(KEY_Y, params.y).apply()
                     } else if (onClick != null) {
                         onClick.invoke()
@@ -257,20 +279,18 @@ class OverlayService : Service() {
         menuContainer.setOnTouchListener(createTouchListener(null))
         rootView.addView(menuContainer)
 
-        // ---------- 主区域：竖排参数 + 右侧按钮列 ----------
+        // ---------- 主区域 ----------
         val mainRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.TOP
         }
 
-        // 参数列表（竖排）
         metricsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
         metricsContainer.setOnTouchListener(createTouchListener { toggleMenu() })
         mainRow.addView(metricsContainer)
 
-        // 右侧按钮列
         val buttonColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.TOP or Gravity.END
@@ -301,12 +321,13 @@ class OverlayService : Service() {
         mainRow.addView(buttonColumn)
         rootView.addView(mainRow)
 
-        // ---------- 曲线区 ----------
+        // ---------- 曲线区（高度缩短一半：72 → 36） ----------
         chartView = MultiSparklineView(this).apply {
             visibility = if (showChart) View.VISIBLE else View.GONE
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(72)
+                dp(70),
+                dp(36)
             ).apply {
                 topMargin = dp(2)
                 bottomMargin = dp(2)
@@ -323,6 +344,17 @@ class OverlayService : Service() {
         else
             @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
+        // 初次坐标也要限制在屏幕内
+        val initX = prefs.getInt(KEY_X, -1)
+        val initY = prefs.getInt(KEY_Y, 300)
+        val (safeX, safeY) = if (initX == -1) {
+            val dm = resources.displayMetrics
+            Math.max(0, dm.widthPixels - dp(160)) to Math.min(initY, dm.heightPixels - dp(200))
+        } else {
+            // 用临时值，等 rootView 测量后由 checkScreenChange 修正
+            initX to initY
+        }
+
         params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -332,15 +364,22 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = prefs.getInt(KEY_X, -1)
-            y = prefs.getInt(KEY_Y, 300)
-            if (x == -1) {
-                x = resources.displayMetrics.widthPixels - dp(160)
-            }
+            x = safeX
+            y = safeY
         }
 
         try {
             wm.addView(rootView, params)
+            // 添加后下一帧再校正一次位置
+            rootView.post {
+                val (cx, cy) = clampPosition(params.x, params.y)
+                if (cx != params.x || cy != params.y) {
+                    params.x = cx
+                    params.y = cy
+                    try { wm.updateViewLayout(rootView, params) } catch (e: Exception) {}
+                    prefs.edit().putInt(KEY_X, cx).putInt(KEY_Y, cy).apply()
+                }
+            }
         } catch (e: Exception) {
             android.widget.Toast.makeText(
                 applicationContext,
@@ -351,9 +390,6 @@ class OverlayService : Service() {
         }
     }
 
-    /**
-     * 竖排重建参数行
-     */
     private fun rebuildMetricsRow() {
         metricsContainer.removeAllViews()
         valueViews.clear()
@@ -406,7 +442,6 @@ class OverlayService : Service() {
         }
         chartView.setSeries(series)
 
-        // Y 轴刻度用第一个参数的实际范围
         if (selectedMetrics.isNotEmpty()) {
             val (min, max) = collector.getRange(selectedMetrics[0])
             chartView.setAxisRange(min, max)
@@ -425,6 +460,15 @@ class OverlayService : Service() {
         chartBtn.setTextColor(if (showChart) colorSelected else Color.parseColor("#CCFFFFFF"))
         if (showChart) {
             updateChartSeries()
+        }
+        // 展开后可能超出屏幕，重新校正
+        rootView.post {
+            val (cx, cy) = clampPosition(params.x, params.y)
+            if (cx != params.x || cy != params.y) {
+                params.x = cx
+                params.y = cy
+                try { wm.updateViewLayout(rootView, params) } catch (e: Exception) {}
+            }
         }
     }
 
@@ -490,13 +534,9 @@ class OverlayService : Service() {
             lastScreenW = dm.widthPixels
             lastScreenH = dm.heightPixels
 
-            val viewW = if (rootView.width > 0) rootView.width else dp(160)
-            val viewH = if (rootView.height > 0) rootView.height else dp(40)
-            val maxX = Math.max(0, dm.widthPixels - viewW)
-            val maxY = Math.max(0, dm.heightPixels - viewH)
-
-            params.x = params.x.coerceIn(0, maxX)
-            params.y = params.y.coerceIn(0, maxY)
+            val (cx, cy) = clampPosition(params.x, params.y)
+            params.x = cx
+            params.y = cy
             try { wm.updateViewLayout(rootView, params) } catch (e: Exception) {}
             prefs.edit().putInt(KEY_X, params.x).putInt(KEY_Y, params.y).apply()
         }
