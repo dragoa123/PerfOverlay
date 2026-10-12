@@ -325,7 +325,6 @@ class OverlayService : Service() {
         chartView = MultiSparklineView(this).apply {
             visibility = if (showChart) View.VISIBLE else View.GONE
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(70),
                 dp(36)
             ).apply {
