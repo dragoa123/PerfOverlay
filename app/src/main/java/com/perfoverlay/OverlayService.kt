@@ -269,6 +269,7 @@ class OverlayService : Service() {
                 cornerRadius = dp(12).toFloat()
             }
             setPadding(dp(8), dp(4), dp(6), dp(4))
+            minimumWidth = dp(150)
         }
 
         // ---------- 参数菜单 ----------
@@ -325,7 +326,7 @@ class OverlayService : Service() {
         chartView = MultiSparklineView(this).apply {
             visibility = if (showChart) View.VISIBLE else View.GONE
             layoutParams = LinearLayout.LayoutParams(
-                dp(70),
+                LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(36)
             ).apply {
                 topMargin = dp(2)
