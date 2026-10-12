@@ -269,7 +269,7 @@ class OverlayService : Service() {
                 cornerRadius = dp(12).toFloat()
             }
             setPadding(dp(8), dp(4), dp(6), dp(4))
-            minimumWidth = dp(150)
+            minimumWidth = dp(100)
         }
 
         // ---------- 参数菜单 ----------
