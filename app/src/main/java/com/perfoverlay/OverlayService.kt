@@ -47,8 +47,8 @@ class OverlayService : Service() {
         )
 
         private const val METRIC_ROW_H = 22
-        private const val NAME_W = 32
-        private const val VALUE_W = 82
+        private const val NAME_W = 28
+        private const val VALUE_W = 72
         private const val BTN_COL_W = 24
     }
 
@@ -269,7 +269,7 @@ class OverlayService : Service() {
                 cornerRadius = dp(12).toFloat()
             }
             setPadding(dp(8), dp(4), dp(6), dp(4))
-            minimumWidth = dp(80)
+            minimumWidth = dp(130)
         }
 
         // ---------- 参数菜单 ----------
@@ -326,8 +326,8 @@ class OverlayService : Service() {
         chartView = MultiSparklineView(this).apply {
             visibility = if (showChart) View.VISIBLE else View.GONE
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(40)
+                dp(NAME_W + VALUE_W),
+                dp(36)
             ).apply {
                 topMargin = dp(2)
                 bottomMargin = dp(2)
